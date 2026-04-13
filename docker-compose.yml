@@ -1,0 +1,82 @@
+# =============================================================================
+#  docker-compose.yml  ―  tile-riscv 開発ワークフロー
+#
+#  使い方:
+#    docker compose run --rm build       # テスト hex をビルド
+#    docker compose run --rm test        # ChiselTest 実行
+#    docker compose run --rm verilog     # SystemVerilog 生成
+#    docker compose run --rm shell       # インタラクティブシェル
+#    docker compose run --rm all         # ビルド → テスト → Verilog 一括
+# =============================================================================
+
+services:
+
+  # ── 共通設定（他サービスが extends で参照） ─────────────────────────────────
+  base: &base
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tile-riscv:latest
+    volumes:
+      # ソースをマウント（コンテナ内の変更はホストに反映される）
+      - .:/work
+      # SBT キャッシュをボリュームで永続化（毎回の依存解決を回避）
+      - sbt-cache:/root/.sbt
+      - ivy-cache:/root/.ivy2
+      - coursier-cache:/root/.cache/coursier
+    working_dir: /work
+
+  # ── riscv-tests から hex を生成 ─────────────────────────────────────────────
+  build:
+    <<: *base
+    command: >
+      bash -c "
+        echo '=== Initializing submodules ===' &&
+        git submodule update --init --recursive &&
+        echo '=== Building test hex files ===' &&
+        make -C tests
+      "
+
+  # ── ChiselTest でテスト実行 ─────────────────────────────────────────────────
+  test:
+    <<: *base
+    command: sbt test
+
+  # ── rv32ui のみテスト ────────────────────────────────────────────────────────
+  test-ui:
+    <<: *base
+    command: sbt "testOnly tileriscv.RV32UITests"
+
+  # ── rv32um のみテスト ────────────────────────────────────────────────────────
+  test-um:
+    <<: *base
+    command: sbt "testOnly tileriscv.RV32UMTests"
+
+  # ── SystemVerilog 生成 ───────────────────────────────────────────────────────
+  verilog:
+    <<: *base
+    command: sbt run
+
+  # ── ビルド → テスト → Verilog 一括実行 ──────────────────────────────────────
+  all:
+    <<: *base
+    command: >
+      bash -c "
+        git submodule update --init --recursive &&
+        make -C tests &&
+        sbt test &&
+        sbt run
+      "
+
+  # ── インタラクティブ開発シェル ───────────────────────────────────────────────
+  shell:
+    <<: *base
+    stdin_open: true
+    tty: true
+    command: bash
+
+# ── ボリューム定義 ────────────────────────────────────────────────────────────
+volumes:
+  sbt-cache:
+  ivy-cache:
+  coursier-cache:
