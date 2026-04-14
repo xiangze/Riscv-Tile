@@ -25,12 +25,24 @@ services:
       - ivy-cache:/root/.ivy2
       - coursier-cache:/root/.cache/coursier
     working_dir: /work
+    # ── git "dubious ownership" 対策 ────────────────────────────────────────
+    # ホストのファイルをマウントするとコンテナ内 root とオーナーが異なり
+    # "fatal: detected dubious ownership in repository at '/work'" が出る。
+    #
+    # 問題: safe.directory=/work だけでは nested submodule
+    #   /work/riscv-tests, /work/riscv-tests/env にアクセスする際に
+    #   再度エラーが起きる。
+    # 解決: git submodule update の前に --global safe.directory '*' を設定し
+    #   全ディレクトリを許可する（コンテナ内限定なのでリスクは低い）。
+    environment:
+      - HOME=/root
 
   # ── riscv-tests から hex を生成 ─────────────────────────────────────────────
   build:
     <<: *base
     command: >
       bash -c "
+        git config --global --add safe.directory '*' &&
         echo '=== Initializing submodules ===' &&
         git submodule update --init --recursive &&
         echo '=== Building test hex files ===' &&
@@ -62,6 +74,7 @@ services:
     <<: *base
     command: >
       bash -c "
+        git config --global --add safe.directory '*' &&
         git submodule update --init --recursive &&
         make -C tests &&
         sbt test &&

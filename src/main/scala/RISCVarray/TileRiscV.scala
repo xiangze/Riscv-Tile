@@ -46,7 +46,7 @@ package tilearrray
 
 import chisel3._
 import chisel3.util._
-
+import _root_.circt.stage.ChiselStage
 // ─────────────────────────────────────────────────────────────────────────────
 //  Configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,7 +354,19 @@ class TileArray(cfg: TileConfig) extends Module {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Verilog emission entry point
 // ─────────────────────────────────────────────────────────────────────────────
+// object TileArrayMain extends App {
+//   val cfg = TileConfig(rows = 4, cols = 4, xlen = 32)
+//   (new circt.stage.ChiselStage).emitSystemVerilog( new TileArray(cfg),firtoolOpts = Array("-o", "generated/TileArray.sv")  )
+// }
+ 
 object TileArrayMain extends App {
   val cfg = TileConfig(rows = 4, cols = 4, xlen = 32)
-  (new circt.stage.ChiselStage).emitSystemVerilog( new TileArray(cfg),firtoolOpts = Array("-o", "generated/TileArray.sv")  )
+  // Chisel 6: ChiselStage はオブジェクトとして直接使う（new は不要）
+  // emitSystemVerilogFile で --target-dir に出力先を指定する
+  ChiselStage.emitSystemVerilogFile(
+    new TileArray(cfg),
+    args        = Array("--target-dir", "generated"),
+    firtoolOpts = Array("--lowering-options=disallowLocalVariables,disallowPackedArrays" )
+  )
 }
+ 

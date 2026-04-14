@@ -4,10 +4,16 @@
 #  含まれるもの:
 #    - OpenJDK 21           (Chisel / SBT に必要)
 #    - SBT 1.10.x           (Scala ビルドツール)
-#    - firtool 1.75.0       (Chisel 6 → SystemVerilog 変換)
+#    - firtool              (SBT warmup 時に Chisel が自動ダウンロード・キャッシュ)
 #    - riscv64-unknown-elf  (bare-metal RISC-V クロスコンパイラ)
 #    - Python 3             (elf2hex.py スクリプト)
 #    - git                  (submodule 操作)
+#
+#  firtool について:
+#    Chisel 6 は sbt compile 時に対応バージョンの firtool を
+#    ~/.cache/coursier/... に自動ダウンロードして使用する。
+#    手動インストールは不要（ファイル名がバージョンにより変わるため不安定）。
+#    SBT warmup ステップで事前取得し、Docker レイヤーにキャッシュする。
 #
 #  ビルド:
 #    docker build -t tile-riscv .
@@ -21,7 +27,6 @@
 FROM ubuntu:24.04
 
 # ── ビルド引数（バージョン固定用） ───────────────────────────────────────────
-ARG FIRTOOL_VERSION=1.75.0
 ARG SBT_VERSION=1.10.7
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -33,22 +38,17 @@ LABEL description="Chisel6 + RISC-V cross toolchain + riscv-tests build environm
 # =============================================================================
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # ── ビルド基盤 ──────────────────────────────────────────────────────────
     curl \
     wget \
     git \
     make \
     ca-certificates \
     gnupg \
-    # ── Java 21 (Chisel/SBT) ─────────────────────────────────────────────────
     openjdk-21-jdk-headless \
-    # ── RISC-V bare-metal ツールチェーン ─────────────────────────────────────
     gcc-riscv64-unknown-elf \
     binutils-riscv64-unknown-elf \
-    # ── Python 3（elf2hex.py） ────────────────────────────────────────────────
     python3 \
     python3-pip \
-    # ── デバッグ・便利ツール ──────────────────────────────────────────────────
     file \
     xxd \
     && rm -rf /var/lib/apt/lists/*
@@ -62,60 +62,41 @@ RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt
     && ln -s /usr/local/sbt/bin/sbt /usr/local/bin/sbt
 
 # =============================================================================
-#  3. firtool（Chisel 6 が内部的に使用する MLIR ベース Verilog コンパイラ）
+#  3. SBT キャッシュのウォームアップ
 #
-#  注: Chisel 6 は firtool を自動ダウンロードしようとするが、
-#      コンテナ内では事前インストールしておく方が再現性が高い。
-# =============================================================================
-
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in \
-      x86_64)  FIRTOOL_ARCH=X64 ;; \
-      aarch64) FIRTOOL_ARCH=ARM64 ;; \
-      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
-    esac && \
-    wget -q "https://github.com/llvm/circt/releases/download/firtool-${FIRTOOL_VERSION}/firrtl-bin-linux-${FIRTOOL_ARCH}.tar.gz" \
-    -O /tmp/firtool.tar.gz && \
-    tar -xz -C /usr/local/bin -f /tmp/firtool.tar.gz \
-        --strip-components=1 \
-        "firtool-${FIRTOOL_VERSION}/bin/firtool" && \
-    rm /tmp/firtool.tar.gz && \
-    firtool --version
-
-# =============================================================================
-#  4. SBT キャッシュのウォームアップ
-#     （最初の sbt 起動を高速化するため、Chisel 依存関係を事前解決）
+#  ここで sbt compile を実行することで:
+#    - Chisel / ChiselTest の jar をダウンロード・キャッシュ
+#    - Chisel が対応する firtool を ~/.cache/coursier に自動ダウンロード
+#
+#  firtool を手動インストールしない理由:
+#    GitHub の CIRCT リリースはファイル名がバージョンにより変化する。
+#      v1.75.0 以前: firrtl-bin-linux-x64.tar.gz
+#      v1.76.0 以降: circt-full-shared-linux-x64.tar.gz
+#    Chisel 組み込みのダウンローダーに任せる方が確実。
+#
+#  ウォームアップ用ファイルを COPY して使う（ヒアドキュメントは使わない）:
+#    RUN cat > build.sbt << 'EOF' ... の形式は Docker のデフォルトパーサーが
+#    "ThisBuild" などを Dockerfile 命令と誤認してエラーになるため。
 # =============================================================================
 
 WORKDIR /tmp/sbt-warmup
 
-# 最小限の build.sbt だけで依存解決を実行
-RUN cat > build.sbt << 'EOF'
-ThisBuild / scalaVersion := "2.13.14"
-val chiselVersion = "6.5.0"
-lazy val root = (project in file(".")).settings(
-  addCompilerPlugin("org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full),
-  libraryDependencies ++= Seq(
-    "org.chipsalliance" %% "chisel"     % chiselVersion,
-    "edu.berkeley.cs"   %% "chiseltest" % "6.0.0" % Test,
-  ),
-)
-EOF
+COPY docker/sbt-warmup/build.sbt                    ./build.sbt
+COPY docker/sbt-warmup/src/main/scala/Warmup.scala  ./src/main/scala/Warmup.scala
 
-RUN mkdir -p project src/main/scala && \
-    echo 'object Warmup extends App { println("ok") }' > src/main/scala/Warmup.scala && \
+RUN mkdir -p project && \
     sbt compile && \
     cd / && rm -rf /tmp/sbt-warmup
 
 # =============================================================================
-#  5. 作業ディレクトリ
+#  4. 作業ディレクトリ
 # =============================================================================
 
 WORKDIR /work
 
 # ── ヘルスチェック ─────────────────────────────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD riscv64-unknown-elf-gcc --version && java -version && firtool --version
+  CMD riscv64-unknown-elf-gcc --version && java -version
 
 # ── デフォルトコマンド ─────────────────────────────────────────────────────
 CMD ["bash"]
