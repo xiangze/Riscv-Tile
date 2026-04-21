@@ -4,7 +4,7 @@
 //    core[0][0] sets t0=42 then sends East  →  core[0][1] receives into t1
 //    core[0][0] sets t1=99 then sends South →  core[1][0] receives into t2
 
-package tilearrray
+package tileriscv
 
 import chisel3._
 import chiseltest._
