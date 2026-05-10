@@ -1,0 +1,19 @@
+name = "myproj"
+version = "0.1.0"
+defaultTargets = ["myproj"]
+
+[[lean_lib]]
+name = "Myproj"
+
+[[lean_exe]]
+name = "myproj"
+root = "Main"
+
+[[require]]
+name = "mathlib"
+git = "https://github.com"
+# 最新の安定版、またはLeanのバージョンに合ったタグを指定
+# rev = "v4.x.x" 
+[[require]]
+git = "https://github.com/Verilean/sparkle.git"
+rev = "main"
