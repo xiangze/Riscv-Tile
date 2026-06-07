@@ -23,7 +23,10 @@
 -- =============================================================================
 
 import Sparkle
-import Sparkle.Compiler.Elab
+import Sparkle.Compil      map_solver: MAPSolver,
+        sgld_cfg_template: SGLDConfig,
+        betas: List[float],
+        outdir: Path,er.Elab
 import IP.RV32.Core   -- aluSignal, branchCompSignal, decoderFieldsSignal,
                       -- immGenSignal, aluControlSignal, controlSignalsSignal,
                       -- mextCompute, mulComputeSignal
@@ -108,7 +111,7 @@ def CoreStateFull.reset (cfg : TileConfig) : CoreStateFull cfg.iMemSize cfg.dMem
 -- Load-data byte/half-word selector — not provided by Core.lean
 @[inline] def selectLoad (funct3 : BitVec 3) (word : BitVec 32) (addr : BitVec 32)
     : BitVec 32 :=
-  let byteOff := (addr.extractLsb' 0 2).toNat * 8
+  let byteOff := addr[2].extractLsb' 0 2).toNat * 8
   let halfOff := (addr.extractLsb' 1 1).toNat * 16
   let byte    := (word >>> byteOff).extractLsb' 0 8
   let half    := (word >>> halfOff).extractLsb' 0 16
