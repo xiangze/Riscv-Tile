@@ -23,10 +23,7 @@
 -- =============================================================================
 
 import Sparkle
-import Sparkle.Compil      map_solver: MAPSolver,
-        sgld_cfg_template: SGLDConfig,
-        betas: List[float],
-        outdir: Path,er.Elab
+import Sparkle.Compiler.Elab
 import IP.RV32.Core   -- aluSignal, branchCompSignal, decoderFieldsSignal,
                       -- immGenSignal, aluControlSignal, controlSignalsSignal,
                       -- mextCompute, mulComputeSignal
@@ -34,6 +31,7 @@ import IP.RV32.Core   -- aluSignal, branchCompSignal, decoderFieldsSignal,
 open Sparkle.Core.Domain
 open Sparkle.Core.Signal
 open Sparkle.IP.RV32  -- brings mextCompute, mulComputeSignal, aluSignal, …
+open Sparkle.Core.Vector
 
 -- ─────────────────────────────────────────────────────────────────────────────
 --  §1  Configuration
@@ -77,18 +75,34 @@ def DirPort.zero (xlen : Nat) : DirPort xlen := { valid := false, data := 0#xlen
 -- ─────────────────────────────────────────────────────────────────────────────
 --  §5  Core state
 -- ─────────────────────────────────────────────────────────────────────────────
+namespace Signal
+/-- Evaluate a purely-combinational signal to its constant value.
+    For any `s := Signal.pure x`, `s.evalPure = x`. -/
+@[inline] def evalPure {α} (s : Signal defaultDomain α) : α := s.atTime 0
+
+/-- The value a constant/pure Signal holds — identical to `evalPure`.
+    Use this when Signal combinators are applied to a lifted constant and you
+    need the result back as a plain value: `(f <$> Signal.pure x).currentValue`. -/
+@[inline] def currentValue {α} (s : Signal defaultDomain α) : α := s.val 0
+end Signal
+
+-- Required by Signal.loop (fixed-point combinator needs Inhabited for the state type)
+private instance {α : Type} {n : Nat} [Inhabited α] : Inhabited (HWVector α n) :=
+  ⟨HWVector.replicate n default⟩
 
 structure CoreState (xlen : Nat) where
   pc       : BitVec xlen
-  regs     : HWVector 32 (BitVec xlen)
-  dirData  : HWVector 4  (BitVec xlen)
-  dirValid : HWVector 4  Bool
+  regs     : HWVector (BitVec xlen) 32
+  dirData  : HWVector (BitVec xlen) 4
+  dirValid : HWVector Bool 4
   halt     : Bool
+  deriving Inhabited
 
 structure CoreStateFull (iMemSize dMemSize xlen : Nat) where
   core : CoreState xlen
-  imem : HWVector iMemSize (BitVec xlen)
-  dmem : HWVector dMemSize (BitVec xlen)
+  imem : HWVector (BitVec xlen) iMemSize
+  dmem : HWVector (BitVec xlen) dMemSize
+  deriving Inhabited
 
 def CoreStateFull.reset (cfg : TileConfig) : CoreStateFull cfg.iMemSize cfg.dMemSize cfg.xlen :=
   { core := { pc       := 0#cfg.xlen
@@ -104,14 +118,14 @@ def CoreStateFull.reset (cfg : TileConfig) : CoreStateFull cfg.iMemSize cfg.dMem
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- x0 hardwiring — used inside loopMemo where we have BitVec, not Signal
-@[inline] def regRead {xlen : Nat} (rf : HWVector 32 (BitVec xlen)) (idx : BitVec 5)
+@[inline] def regRead {xlen : Nat} (rf : HWVector (BitVec xlen) 32) (idx : BitVec 5)
     : BitVec xlen :=
   if idx == 0#5 then 0#xlen else rf.get idx.toFin
 
 -- Load-data byte/half-word selector — not provided by Core.lean
 @[inline] def selectLoad (funct3 : BitVec 3) (word : BitVec 32) (addr : BitVec 32)
     : BitVec 32 :=
-  let byteOff := addr[2].extractLsb' 0 2).toNat * 8
+  let byteOff := addr[2].toNat * 8
   let halfOff := (addr.extractLsb' 1 1).toNat * 16
   let byte    := (word >>> byteOff).extractLsb' 0 8
   let half    := (word >>> halfOff).extractLsb' 0 16
@@ -151,26 +165,26 @@ def CoreStateFull.reset (cfg : TileConfig) : CoreStateFull cfg.iMemSize cfg.dMem
 
 -- Immediate — delegates to immGenSignal applied to a constant Signal
 @[inline] def decodeImm (opcode : BitVec 7) (inst : BitVec 32) : BitVec 32 :=
-  (immGenSignal (Signal.pure inst) (Signal.pure opcode)).currentValue
+ Signal.evalPure (immGenSignal (Signal.pure inst) (Signal.pure opcode))
 
 -- ALU opcode — delegates to aluControlSignal applied to constant Signals
 @[inline] def decodeAluOp (opcode : BitVec 7) (funct3 : BitVec 3) (funct7 : BitVec 7)
     : BitVec 4 :=
-  (aluControlSignal (Signal.pure opcode)
+  Signal.evalPure (aluControlSignal (Signal.pure opcode)
                     (Signal.pure funct3)
-                    (Signal.pure funct7)).currentValue
+                    (Signal.pure funct7))
 
 -- Integer ALU result — delegates to aluSignal applied to constant Signals
 @[inline] def applyAlu (op : BitVec 4) (a b : BitVec 32) : BitVec 32 :=
-  (aluSignal (Signal.pure op) (Signal.pure a) (Signal.pure b)).currentValue
+  Signal.evalPure (aluSignal (Signal.pure op) (Signal.pure a) (Signal.pure b))
 
 -- Branch condition — delegates to branchCompSignal applied to constant Signals
 @[inline] def applyBranch (funct3 : BitVec 3) (a b : BitVec 32) : Bool :=
-  (branchCompSignal (Signal.pure funct3) (Signal.pure a) (Signal.pure b)).currentValue
+  Signal.evalPure (branchCompSignal (Signal.pure funct3) (Signal.pure a) (Signal.pure b))
 
 -- ALU source-B selector — mirrors controlSignalsSignal's aluSrcB computation
 @[inline] def aluSrcBSel (opcode : BitVec 7) : Bool :=
-  let ctrl := (controlSignalsSignal (Signal.pure opcode)).currentValue
+  let ctrl := Signal.evalPure (controlSignalsSignal (Signal.pure opcode))
   -- aluSrcB is the first field of the nested pair returned by controlSignalsSignal
   -- type: ((Bool × (Bool × Bool)) × ((Bool × (Bool × Bool)) × (Bool × (Bool × Bool))))
   ctrl.1.1
@@ -179,118 +193,151 @@ def CoreStateFull.reset (cfg : TileConfig) : CoreStateFull cfg.iMemSize cfg.dMem
 --  §8  Full TileCore
 -- ─────────────────────────────────────────────────────────────────────────────
 
-def tileCoreFullDef {dom : DomainConfig} (cfg : TileConfig)
-    (neighborIn : HWVector 4 (Signal dom (DirPort cfg.xlen)))
-    : Signal dom (CoreStateFull cfg.iMemSize cfg.dMemSize cfg.xlen) :=
+/-- Pure single-cycle step for one RV32 tile.
+    Parameterised by memory sizes only; xlen is fixed to 32 to match all the
+    RV32-only helper functions (decodeFields, applyAlu, mextCompute, …).
+    `nbrPorts` carries the four neighbour DirPort values as plain values. -/
+private def coreStepPure (iMemSize dMemSize : Nat)
+    (nbrPorts : HWVector (DirPort 32) 4)
+    (s : CoreStateFull iMemSize dMemSize 32)
+    : CoreStateFull iMemSize dMemSize 32 :=
+  let c    := s.core
+  let imem := s.imem
+  let dmem := s.dmem
+  if c.halt then s
+  -- Guard against zero-size memories (Fin proof would be vacuously false)
+  else if h_i : iMemSize = 0 then s
+  else if h_d : dMemSize = 0 then s
+  else
+  have iSz_pos : 0 < iMemSize := by omega
+  have dSz_pos : 0 < dMemSize := by omega
 
-  Signal.loopMemo (CoreStateFull.reset cfg) fun s =>
+  -- ── Fetch ──────────────────────────────────────────────────────────────
+  let wordAddr := (c.pc >>> 2).toNat % iMemSize
+  let inst     := imem.get ⟨wordAddr, Nat.mod_lt _ iSz_pos⟩
 
-    let c    := s.core
-    let imem := s.imem
-    let dmem := s.dmem
+  -- ── Decode ─────────────────────────────────────────────────────────────
+  let (opcode, rd, funct3, rs1Idx, rs2Idx, funct7) := decodeFields inst
 
-    if c.halt then s
-    else
+  let rs1Val := regRead c.regs rs1Idx
+  let rs2Val := regRead c.regs rs2Idx
 
-    -- ── Fetch ──────────────────────────────────────────────────────────────
-    let wordAddr := (c.pc >>> 2).toNat % cfg.iMemSize
-    let inst     := imem.get ⟨wordAddr, by omega⟩
+  -- ── Immediate ───────────────────────────────────────────────────────────
+  let imm := decodeImm opcode inst
 
-    -- ── Decode ─────────────────────────────────────────────────────────────
-    --  All field extraction via decodeFields (≡ decoderFieldsSignal internals)
-    let (opcode, rd, funct3, rs1Idx, rs2Idx, funct7) := decodeFields inst
+  -- ── ALU ─────────────────────────────────────────────────────────────────
+  let aluSrcB := aluSrcBSel opcode
+  let aluB    := if aluSrcB then imm else rs2Val
+  let aluOp   := decodeAluOp opcode funct3 funct7
+  let alu     := applyAlu aluOp rs1Val aluB
 
-    let rs1Val  := regRead c.regs rs1Idx
-    let rs2Val  := regRead c.regs rs2Idx
+  -- ── RV32M ────────────────────────────────────────────────────────────────
+  let isMExt  := funct7 == 0b0000001#7
+  let mResult := mextCompute funct3 rs1Val rs2Val
 
-    -- ── Immediate (immGenSignal) ─────────────────────────────────────────────
-    let imm     := decodeImm opcode inst
+  -- ── Branch ───────────────────────────────────────────────────────────────
+  let taken := applyBranch funct3 rs1Val rs2Val
 
-    -- ── ALU (aluControlSignal + aluSignal) ──────────────────────────────────
-    let aluSrcB := aluSrcBSel opcode                  -- controlSignalsSignal
-    let aluB    := if aluSrcB then imm else rs2Val
-    let aluOp   := decodeAluOp opcode funct3 funct7   -- aluControlSignal
-    let alu     := applyAlu aluOp rs1Val aluB          -- aluSignal
+  -- ── Load ─────────────────────────────────────────────────────────────────
+  let ldAddr    := rs1Val + (decodeImm 0b0000011#7 inst)
+  let ldWordIdx := (ldAddr >>> 2).toNat % dMemSize
+  let ldWord    := dmem.get ⟨ldWordIdx, Nat.mod_lt _ dSz_pos⟩
+  let loadData  := selectLoad funct3 ldWord ldAddr
 
-    -- ── RV32M (mextCompute from Core.lean) ──────────────────────────────────
-    let isMExt  := funct7 == 0b0000001#7
-    let mResult := mextCompute funct3 rs1Val rs2Val
+  -- ── Tile custom decode ───────────────────────────────────────────────────
+  let tileDir := (funct3.extractLsb' 0 2).toFin
+  let isSend  := funct7.extractLsb' 0 1 == 1#1
 
-    -- ── Branch (branchCompSignal) ────────────────────────────────────────────
-    let taken   := applyBranch funct3 rs1Val rs2Val
+  -- ── Execute + write-back ─────────────────────────────────────────────────
+  let (rdWen, rdWdata, nextPc, nextHalt, nextDirData, nextDirValid, nextDmem) :=
 
-    -- ── Load ────────────────────────────────────────────────────────────────
-    let ldAddr   := rs1Val + (decodeImm 0b0000011#7 inst)  -- force I-type imm
-    let ldWordIdx := (ldAddr >>> 2).toNat % cfg.dMemSize
-    let ldWord   := dmem.get ⟨ldWordIdx, by omega⟩
-    let loadData := selectLoad funct3 ldWord ldAddr
+    if opcode == 0b0110111#7 then                   -- LUI
+      (true, alu, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-    -- ── Tile instruction decode ─────────────────────────────────────────────
-    let tileDir  := (funct3.extractLsb' 0 2).toFin (by omega)
-    let isSend   := funct7.extractLsb' 0 1 == 1#1
+    else if opcode == 0b0010111#7 then              -- AUIPC
+      (true, c.pc + imm, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-    -- ── Execute + write-back ────────────────────────────────────────────────
-    let (rdWen, rdWdata, nextPc, nextHalt, nextDirData, nextDirValid, nextDmem) :=
+    else if opcode == 0b1101111#7 then              -- JAL
+      (true, c.pc + 4#32, c.pc + imm, false, c.dirData, c.dirValid, dmem)
 
-      if opcode == 0b0110111#7 then                  -- LUI
-        (true, alu, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b1100111#7 then              -- JALR
+      let target := (rs1Val + decodeImm 0b0000011#7 inst) &&& (~~~1#32)
+      (true, c.pc + 4#32, target, false, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b0010111#7 then             -- AUIPC
-        (true, c.pc + imm, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b1100011#7 then              -- BRANCH
+      let brPc := if taken then c.pc + imm else c.pc + 4#32
+      (false, 0#32, brPc, false, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b1101111#7 then             -- JAL
-        (true, c.pc + 4#32, c.pc + imm, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b0000011#7 then              -- LOAD
+      (true, loadData, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b1100111#7 then             -- JALR
-        let target := (rs1Val + decodeImm 0b0000011#7 inst) &&& (~~~1#32)
-        (true, c.pc + 4#32, target, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b0100011#7 then              -- STORE
+      let stIdx   := ((rs1Val + imm) >>> 2).toNat % dMemSize
+      let newDmem := dmem.set ⟨stIdx, Nat.mod_lt _ dSz_pos⟩ rs2Val
+      (false, 0#32, c.pc + 4#32, false, c.dirData, c.dirValid, newDmem)
 
-      else if opcode == 0b1100011#7 then             -- BRANCH
-        let brPc := if taken then c.pc + imm else c.pc + 4#32
-        (false, 0#32, brPc, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b0010011#7 then              -- ALU-IMM
+      (true, alu, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b0000011#7 then             -- LOAD
-        (true, loadData, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
+    else if opcode == 0b0110011#7 then              -- ALU-RR (RV32I/M)
+      (true, if isMExt then mResult else alu,
+       c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b0100011#7 then             -- STORE
-        let stIdx   := ((rs1Val + imm) >>> 2).toNat % cfg.dMemSize
-        let newDmem := dmem.set ⟨stIdx, by omega⟩ rs2Val
-        (false, 0#32, c.pc + 4#32, false, c.dirData, c.dirValid, newDmem)
+    else if opcode == 0b1110011#7 then              -- SYSTEM → halt
+      (false, 0#32, c.pc, true, c.dirData, c.dirValid, dmem)
 
-      else if opcode == 0b0010011#7 then             -- ALU-IMM
-        (true, alu, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
-
-      else if opcode == 0b0110011#7 then             -- ALU-RR (RV32I/M)
-        (true, if isMExt then mResult else alu,
-         c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
-
-      else if opcode == 0b1110011#7 then             -- SYSTEM → halt
-        (false, 0#32, c.pc, true, c.dirData, c.dirValid, dmem)
-
-      else if opcode == OP_CUSTOM0 then
-        if isSend then
-          -- TILE_SEND dir, rs1
-          let newDirData  := c.dirData.set  tileDir rs1Val
-          let newDirValid := c.dirValid.set tileDir true
-          (false, 0#32, c.pc + 4#32, false, newDirData, newDirValid, dmem)
-        else
-          -- TILE_RECV rd, dir  ← neighbor's registered dirData (1-cycle latency)
-          let nbrData := (neighborIn.get tileDir).currentValue.data
-          (true, nbrData, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
-
+    else if opcode == OP_CUSTOM0 then
+      if isSend then
+        let newDirData  := c.dirData.set  tileDir rs1Val
+        let newDirValid := c.dirValid.set tileDir true
+        (false, 0#32, c.pc + 4#32, false, newDirData, newDirValid, dmem)
       else
-        (false, 0#32, c.pc, inst == 0#32, c.dirData, c.dirValid, dmem)
+        -- TILE_RECV: neighbour port is already a plain DirPort 32 value
+        let nbrData := (nbrPorts.get tileDir).data
+        (true, nbrData, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
 
-    -- ── Register file write (x0 hardwired 0) ────────────────────────────────
-    let rdIdx5  := rd.extractLsb' 0 5
-    let newRegs := if rdWen && rdIdx5 != 0#5 then c.regs.set rdIdx5.toFin rdWdata
-                  else c.regs
+    else
+      (false, 0#32, c.pc, inst == 0#32, c.dirData, c.dirValid, dmem)
 
-    { core  := { pc := nextPc, regs := newRegs
-                 dirData := nextDirData, dirValid := nextDirValid
-                 halt := nextHalt }
-      imem  := imem
-      dmem  := nextDmem }
+  -- ── Register file write (x0 hardwired 0) ────────────────────────────────
+  let rdIdx5  := rd.extractLsb' 0 5
+  let newRegs := if rdWen && rdIdx5 != 0#5 then c.regs.set rdIdx5.toFin rdWdata
+                else c.regs
+
+  { core := { pc := nextPc, regs := newRegs
+              dirData := nextDirData, dirValid := nextDirValid
+              halt := nextHalt }
+    imem := imem
+    dmem := nextDmem }
+
+/-- Build a Signal-level tile core.
+    `h_xlen : cfg.xlen = 32` is required because all RV32 helpers are hardcoded
+    for BitVec 32; we use `▸` to cast between `cfg.xlen` and `32` at the boundary.
+
+    Correct `Signal.loop` usage:
+      `loop (f : Signal dom α → Signal dom α) : Signal dom α`
+    The body uses `Signal.register` for the one-cycle state delay. -/
+def tileCoreFullDef {dom : DomainConfig} (cfg : TileConfig)
+    (h_xlen : cfg.xlen = 32)
+    (neighborIn : HWVector (Signal dom (DirPort cfg.xlen)) 4)
+    : Signal dom (CoreStateFull cfg.iMemSize cfg.dMemSize cfg.xlen) :=
+  -- Cast DirPort cfg.xlen → DirPort 32 at the Signal level using h_xlen.
+  -- (h_xlen.symm ▸ e) rewrites expected type 32→cfg.xlen, so e : ...cfg.xlen fits as ...32)
+  let neighborIn32 : HWVector (Signal dom (DirPort 32)) 4 := h_xlen.symm ▸ neighborIn
+  let nbrs : Signal dom (HWVector (DirPort 32) 4) :=
+    (fun n0 n1 n2 n3 => HWVector.ofList [n0, n1, n2, n3])
+    <$> neighborIn32.get DirN <*> neighborIn32.get DirS
+    <*> neighborIn32.get DirE <*> neighborIn32.get DirW
+  -- Cast reset state cfg.xlen → 32
+  let init : CoreStateFull cfg.iMemSize cfg.dMemSize 32 := h_xlen.symm ▸ CoreStateFull.reset cfg
+  -- Run the fixpoint loop at the concrete BitVec-32 type
+  let loop32 : Signal dom (CoreStateFull cfg.iMemSize cfg.dMemSize 32) :=
+    Signal.loop fun nextSig =>
+      (fun prev nbrsNow => coreStepPure cfg.iMemSize cfg.dMemSize nbrsNow prev)
+      <$> Signal.register init nextSig
+      <*> nbrs
+  -- Cast result 32 → cfg.xlen to match the declared return type
+  h_xlen ▸ loop32
 
 -- ─────────────────────────────────────────────────────────────────────────────
 --  §9  TileArray  ─  N×M mesh wiring
@@ -299,12 +346,13 @@ def tileCoreFullDef {dom : DomainConfig} (cfg : TileConfig)
 abbrev CoreGrid (rows cols iMemSize dMemSize xlen : Nat) :=
   Array (Array (Signal defaultDomain (CoreStateFull iMemSize dMemSize xlen)))
 
-def tileArray (cfg : TileConfig) : CoreGrid cfg.rows cfg.cols cfg.iMemSize cfg.dMemSize cfg.xlen :=
+def tileArray (cfg : TileConfig) (h_xlen : cfg.xlen = 32)
+    : CoreGrid cfg.rows cfg.cols cfg.iMemSize cfg.dMemSize cfg.xlen :=
   let zeroDirPort : Signal defaultDomain (DirPort cfg.xlen) :=
     Signal.pure (DirPort.zero cfg.xlen)
   let dirOut (coreSig : Signal defaultDomain (CoreStateFull cfg.iMemSize cfg.dMemSize cfg.xlen))
              (dir : Fin 4) : Signal defaultDomain (DirPort cfg.xlen) :=
-    coreSig <$> fun s => { valid := s.core.dirValid.get dir, data := s.core.dirData.get dir }
+    (fun s => { valid := s.core.dirValid.get dir, data := s.core.dirData.get dir }) <$> coreSig
   let grid : Array (Array _) :=
     Array.ofFn (n := cfg.rows) fun r =>
     Array.ofFn (n := cfg.cols) fun c =>
@@ -312,20 +360,24 @@ def tileArray (cfg : TileConfig) : CoreGrid cfg.rows cfg.cols cfg.iMemSize cfg.d
       let nbrS := if r + 1 < cfg.rows then dirOut (grid.get! (r+1) |>.get! c)  DirN else zeroDirPort
       let nbrE := if c + 1 < cfg.cols then dirOut (grid.get! r |>.get! (c+1))  DirW else zeroDirPort
       let nbrW := if c > 0            then dirOut (grid.get! r |>.get! (c-1))  DirE else zeroDirPort
-      tileCoreFullDef cfg (HWVector.ofList [nbrN, nbrS, nbrE, nbrW])
+      tileCoreFullDef cfg h_xlen (HWVector.ofList [nbrN, nbrS, nbrE, nbrW])
   grid
 
 -- ─────────────────────────────────────────────────────────────────────────────
 --  §10  Synthesis entry point
 -- ─────────────────────────────────────────────────────────────────────────────
 
-def tileArrayTop : Signal defaultDomain (HWVector (4 * 4) Bool) :=
+def tileArrayTop : Signal defaultDomain (HWVector Bool (4 * 4)) :=
   let grid := tileArray { rows := 4, cols := 4, xlen := 32,
-                          iMemSize := 1024, dMemSize := 1024 }
+                          iMemSize := 1024, dMemSize := 1024 } rfl
+  -- default Signal used when grid index is out of range (never happens for 4×4)
+  let defCoreSig : Signal defaultDomain (CoreStateFull 1024 1024 32) :=
+    Signal.pure default
   let haltSignals : Array (Signal defaultDomain Bool) :=
     (Array.range 4).flatMap fun r =>
     (Array.range 4).map     fun c =>
-      (grid.get! r |>.get! c) <$> fun s => s.core.halt
+      let coreSig := (grid.getD r #[]).getD c defCoreSig
+      (fun (s : CoreStateFull 1024 1024 32) => s.core.halt) <$> coreSig
   Signal.mapN haltSignals (fun v => HWVector.ofArray v)
 
 #synthesizeVerilog tileArrayTop
@@ -354,6 +406,8 @@ theorem mul_lower_32 (a b : BitVec 32) :
                              iMemSize := 1024, dMemSize := 1024 }
   let zeroDirPort : Signal defaultDomain (DirPort 32) := Signal.pure (DirPort.zero 32)
   let neighborIn  := HWVector.replicate 4 zeroDirPort
-  let coreSig     := tileCoreFullDef cfg neighborIn
-  let samples := (List.range 5).map fun t => (coreSig.sample t).core.halt
+  -- rfl proves cfg.xlen = 32 since cfg is a concrete literal
+  let coreSig     := tileCoreFullDef cfg rfl neighborIn
+  -- .atTime t : CoreStateFull 1024 1024 32  (.sample returns List, .atTime returns single value)
+  let samples := (List.range 5).map fun t => (coreSig.atTime t).core.halt
   IO.println s!"halt per cycle: {samples}"
