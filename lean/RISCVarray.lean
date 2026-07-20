@@ -1,4 +1,4 @@
-import TileRiscV.lean
-import TileRiscV_Equiv.lean
-import TileRiscV_RV32_Equiv.lean
-import TileRiscV_simple.lean
+-- import RISCVarray.TileRiscV
+import RISCVarray.TileRiscV_simple
+--import RISCVarray.TileRiscV_Equiv
+import RISCVarray.TileRiscV_RV32_Equiv

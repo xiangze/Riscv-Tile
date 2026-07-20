@@ -8,14 +8,15 @@ name = "RISCVarray"
 [[lean_exe]]
 name = "riscv_array"
 root = "Main"
+supportInterpreter = true
 
 [[require]]
 name ="Sparkle"
 git = "https://github.com/Verilean/sparkle.git"
 rev = "main"
 
-[[require]]
-name = "mathlib"
-git = "https://github.com/leanprover-community/mathlib4"
+#[[require]]
+#name = "mathlib"
+#git = "https://github.com/leanprover-community/mathlib4"
 # 最新の安定版、またはLeanのバージョンに合ったタグを指定
 # rev = "v4.x.x" 

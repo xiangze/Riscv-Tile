@@ -30,8 +30,10 @@
 -- =============================================================================
 
 import Sparkle
+import Sparkle.Compiler.Elab
 open Sparkle.Core.Domain
 open Sparkle.Core.Signal
+open Sparkle.Core.Vector
 
 -- ─────────────────────────────────────────────────────────────────────────────
 --  §1  Configuration (elaboration-time constants, not signals)
@@ -89,12 +91,16 @@ def DirPort.zero (xlen : Nat) : DirPort xlen := { valid := false, data := 0#xlen
 --  can correctly infer registers and handle combinational feedback.
 -- ─────────────────────────────────────────────────────────────────────────────
 
+private instance {α : Type} {n : Nat} [Inhabited α] : Inhabited (HWVector α n) :=
+  ⟨HWVector.replicate n default⟩
+
 structure CoreState (xlen : Nat) where
   pc       : BitVec xlen
-  regs     : HWVector 32 (BitVec xlen)   -- x0..x31 (x0 hardwired to 0 by convention)
-  dirData  : HWVector 4  (BitVec xlen)   -- directional output registers
-  dirValid : HWVector 4  Bool
+  regs     : HWVector (BitVec xlen) 32 -- x0..x31 (x0 hardwired to 0 by convention)
+  dirData  : HWVector (BitVec xlen) 4  -- directional output registers
+  dirValid : HWVector Bool 4
   halt     : Bool
+deriving Inhabited
 
 def CoreState.reset (xlen : Nat) : CoreState xlen :=
   { pc       := 0#xlen
@@ -112,18 +118,22 @@ def signExt (xlen : Nat) {w : Nat} (v : BitVec w) : BitVec xlen :=
   v.signExtend xlen
 
 -- Read rs, enforcing x0 = 0
-def regRead {xlen : Nat} (rf : HWVector 32 (BitVec xlen)) (idx : BitVec 5) : BitVec xlen :=
+def regRead {xlen : Nat} (rf : HWVector (BitVec xlen) 32) (idx : BitVec 5) : BitVec xlen :=
   if idx == 0#5 then 0#xlen else rf.get (idx.toFin)
 
+-- Convert the integer -5 to a 64-bit bitvector
+def myBitVec {n : Nat} : BitVec n := BitVec.ofInt n (-5)
+
+-- Convert an Int to a BitVec of width n using two's complement encoding.
+def intToBitVec {n : Nat} (x : Int) : BitVec n :=
+  if x < 0 then BitVec.ofInt n (x + (2^n : Int)) else BitVec.ofInt n x
+
 -- Immediate generators (all sign-extended to xlen = 32 here; generalised below)
-def immI (inst : BitVec 32) : BitVec 32 := signExt 32 (inst.extract 31 20)
-def immS (inst : BitVec 32) : BitVec 32 :=
-  signExt 32 ((inst.extract 31 25) ++ (inst.extract 11 7))
-def immB (inst : BitVec 32) : BitVec 32 :=
-  signExt 32 ((inst.extract 31 31) ++ (inst.extract 7 7) ++
+def immI (inst : BitVec 32) : BitVec 32 := signExt 32 inst[31,20]
+def immS (inst : BitVec 32) : BitVec 32 := signExt 32 (inst[31,25] ++ inst[11, 7])
+def immB (inst : BitVec 32) : BitVec 32 := signExt 32 inst[31, 31] ++ inst[7,7] ++
               (inst.extract 30 25) ++ (inst.extract 11 8) ++ 0#1)
-def immU (inst : BitVec 32) : BitVec 32 :=
-  (inst.extract 31 12) ++ 0#12
+def immU (inst : BitVec 32) : BitVec 32 :=(inst.extract 31 12) ++ 0#12
 def immJ (inst : BitVec 32) : BitVec 32 :=
   signExt 32 ((inst.extract 31 31) ++ (inst.extract 19 12) ++
               (inst.extract 20 20) ++ (inst.extract 30 21) ++ 0#1)
@@ -133,18 +143,18 @@ def immJ (inst : BitVec 32) : BitVec 32 :=
 -- ─────────────────────────────────────────────────────────────────────────────
 
 def mExtResult (funct3 : BitVec 3) (rs1 rs2 : BitVec 32) : BitVec 32 :=
-  let mulSS := (rs1.toInt  * rs2.toInt ).toBitVec 64
-  let mulSU := (rs1.toInt  * rs2.toNat ).toBitVec 64
-  let mulUU := (rs1.toNat  * rs2.toNat ).toBitVec 64
+  let mulSS := intToBitVec (rs1.toInt * rs2.toInt) : BitVec 64
+  let mulSU := intToBitVec (rs1.toInt * rs2.toNat) : BitVec 64
+  let mulUU := (rs1.toNat * rs2.toNat).toBitVec 64
   let divByZ := rs2 == 0#32
   let overFlow := rs1 == 0x80000000#32 && rs2 == 0xFFFFFFFF#32
   -- signed div/rem
   let divS := if divByZ then 0xFFFFFFFF#32
               else if overFlow then 0x80000000#32
-              else (rs1.toInt / rs2.toInt).toBitVec 32
+              else intToBitVec (rs1.toInt / rs2.toInt)
   let remS := if divByZ then rs1
               else if overFlow then 0#32
-              else (rs1.toInt % rs2.toInt).toBitVec 32
+              else intToBitVec (rs1.toInt % rs2.toInt)
   -- unsigned div/rem
   let divU := if divByZ then 0xFFFFFFFF#32 else (rs1.toNat / rs2.toNat).toBitVec 32
   let remU := if divByZ then rs1            else (rs1.toNat % rs2.toNat).toBitVec 32
