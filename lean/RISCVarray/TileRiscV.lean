@@ -131,9 +131,8 @@ def intToBitVec {n : Nat} (x : Int) : BitVec n :=
 -- Immediate generators (all sign-extended to xlen = 32 here; generalised below)
 def immI (inst : BitVec 32) : BitVec 32 := signExt 32 inst[31,20]
 def immS (inst : BitVec 32) : BitVec 32 := signExt 32 (inst[31,25] ++ inst[11, 7])
-def immB (inst : BitVec 32) : BitVec 32 := signExt 32 inst[31, 31] ++ inst[7,7] ++
-              (inst.extract 30 25) ++ (inst.extract 11 8) ++ 0#1)
-def immU (inst : BitVec 32) : BitVec 32 :=(inst.extract 31 12) ++ 0#12
+def immB (inst : BitVec 32) : BitVec 32 := signExt 32 inst[31, 31] ++ inst[7,7] ++ inst[30, 25] ++ (inst[11, 8] ++ 0#1)
+def immU (inst : BitVec 32) : BitVec 32 := inst[ 31, 12] ++ 0#12
 def immJ (inst : BitVec 32) : BitVec 32 :=
   signExt 32 ((inst.extract 31 31) ++ (inst.extract 19 12) ++
               (inst.extract 20 20) ++ (inst.extract 30 21) ++ 0#1)
@@ -159,7 +158,7 @@ def mExtResult (funct3 : BitVec 3) (rs1 rs2 : BitVec 32) : BitVec 32 :=
   let divU := if divByZ then 0xFFFFFFFF#32 else (rs1.toNat / rs2.toNat).toBitVec 32
   let remU := if divByZ then rs1            else (rs1.toNat % rs2.toNat).toBitVec 32
   match funct3 with
-  | 0b000#3 => mulSS.extract 31 0   -- MUL
+  | 0b000#3 => mulSS[ 31, 0]   -- MUL
   | 0b001#3 => mulSS.extract 63 32  -- MULH
   | 0b010#3 => mulSU.extract 63 32  -- MULHSU
   | 0b011#3 => mulUU.extract 63 32  -- MULHU
@@ -174,7 +173,7 @@ def mExtResult (funct3 : BitVec 3) (rs1 rs2 : BitVec 32) : BitVec 32 :=
 
 def aluResult (funct3 : BitVec 3) (funct7_5 : Bool) (isOp : Bool)
               (a b : BitVec 32) : BitVec 32 :=
-  let shamt := (b.extract 4 0).toNat
+  let shamt := b[4,0].toNat
   match funct3 with
   | 0b000#3 => if funct7_5 && isOp then a - b else a + b
   | 0b001#3 => a <<< shamt

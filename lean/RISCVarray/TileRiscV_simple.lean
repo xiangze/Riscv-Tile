@@ -295,7 +295,6 @@ private def coreStepPure (iMemSize dMemSize : Nat)
         -- TILE_RECV: neighbour port is already a plain DirPort 32 value
         let nbrData := (nbrPorts.get tileDir).data
         (true, nbrData, c.pc + 4#32, false, c.dirData, c.dirValid, dmem)
-
     else
       (false, 0#32, c.pc, inst == 0#32, c.dirData, c.dirValid, dmem)
 
@@ -339,9 +338,9 @@ def tileCoreFullDef {dom : DomainConfig} (cfg : TileConfig)
   -- Cast result 32 → cfg.xlen to match the declared return type
   h_xlen ▸ loop32
 
--- ─────────────────────────────────────────────────────────────────────────────
---  §9  TileArray  ─  N×M mesh wiring
--- ─────────────────────────────────────────────────────────────────────────────
+-- -- ─────────────────────────────────────────────────────────────────────────────
+-- --  §9  TileArray  ─  N×M mesh wiring
+-- -- ─────────────────────────────────────────────────────────────────────────────
 
 abbrev CoreGrid (rows cols iMemSize dMemSize xlen : Nat) :=
   Array (Array (Signal defaultDomain (CoreStateFull iMemSize dMemSize xlen)))
